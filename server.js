@@ -1,19 +1,26 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-app.use(cors());
+// ============================================================
+// 🔥 CORS - Allow all origins
+// ============================================================
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 
 // ============================================================
-// 📁 ORDERS FILE (JSON Database)
+// 📁 ORDERS FILE
 // ============================================================
 const ORDERS_FILE = path.join(__dirname, 'orders.json');
 
@@ -40,85 +47,70 @@ function saveOrders(orders) {
 }
 
 // ============================================================
-// 📧 EMAIL SETUP
+// 🏠 ROOT ENDPOINT
 // ============================================================
-let transporter = null;
-if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-    transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS
+app.get('/', (req, res) => {
+    res.json({
+        name: 'UT Halal Gyro Backend',
+        status: 'running',
+        version: '1.0.0',
+        endpoints: {
+            root: '/',
+            health: '/api/health',
+            payment: '/api/initiate-payment',
+            orders: '/api/orders?password=admin123',
+            webhook: '/api/webhook'
         }
     });
-    console.log('✅ Email notifications ENABLED');
-}
+});
 
 // ============================================================
-// 📧 SEND EMAIL
+// ❤️ HEALTH CHECK - FIXED
 // ============================================================
-async function sendOrderEmail(order) {
-    if (!transporter) return false;
-
-    const { transactionId, method, total, items, customerName, customerEmail, customerPhone, timestamp, status } = order;
-
-    const methodIcons = {
-        moonpay: '🌙', transak: '🔄', alchemypay: '⚗️', banxa: '🏦',
-        mercuryo: '⚡', wert: '🪙', ramp: '🚀', card: '💳'
-    };
-    const icon = methodIcons[method] || '💳';
-
-    const itemsText = items.map(i => `${i.name} x ${i.qty} = $${(i.price * i.qty).toFixed(2)}`).join('\n');
-
-    const mailOptions = {
-        from: process.env.EMAIL_USER,
-        to: process.env.NOTIFICATION_EMAIL || process.env.EMAIL_USER,
-        subject: `🆕 New Order! ${transactionId}`,
-        text: `
-╔═══════════════════════════════════════════════╗
-║          🆕 NEW ORDER RECEIVED               ║
-╚═══════════════════════════════════════════════╝
-
-🔑 Transaction: ${transactionId}
-${icon} Method: ${method.toUpperCase()}
-💰 Total: $${total.toFixed(2)}
-📊 Status: ${status || 'PENDING'}
-
-👤 Customer: ${customerName || 'Guest'}
-📧 Email: ${customerEmail || 'Not provided'}
-📞 Phone: ${customerPhone || 'Not provided'}
-
-📦 Items:
-${itemsText}
-
-📍 UT Halal Gyro · 17731 Kessler Dr, Pflugerville, TX
-📞 +1 804-410-4022
-        `
-    };
-
-    try {
-        await transporter.sendMail(mailOptions);
-        console.log(`📧 Email sent: ${transactionId}`);
-        return true;
-    } catch (error) {
-        console.error('Email error:', error);
-        return false;
-    }
-}
+app.get('/api/health', (req, res) => {
+    res.json({ 
+        status: 'OK', 
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        message: '✅ UT Halal Gyro Backend is running!'
+    });
+});
 
 // ============================================================
 // 💳 PAYMENT ENDPOINT
 // ============================================================
 app.post('/api/initiate-payment', async (req, res) => {
     try {
+        console.log('📥 Payment request received:', req.body);
+
         const { method, total, items, customerName, customerEmail, customerPhone } = req.body;
 
-        if (!method || !total || !items || items.length === 0) {
-            return res.status(400).json({ success: false, error: 'Missing required fields' });
+        // Validation
+        if (!method) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Payment method is required' 
+            });
         }
 
+        if (!total || total <= 0) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Invalid total amount' 
+            });
+        }
+
+        if (!items || items.length === 0) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Cart is empty' 
+            });
+        }
+
+        // Generate transaction ID
         const transactionId = `TX${Date.now().toString().slice(-8)}${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 
+        // Create order
         const order = {
             transactionId,
             method,
@@ -128,18 +120,15 @@ app.post('/api/initiate-payment', async (req, res) => {
             customerEmail: customerEmail || 'guest@example.com',
             customerPhone: customerPhone || 'Not provided',
             timestamp: new Date().toISOString(),
-            status: 'pending',
-            paymentDetails: null,
-            webhookReceived: false
+            status: 'pending'
         };
 
+        // Save order
         let orders = loadOrders();
         orders.push(order);
         saveOrders(orders);
 
-        console.log(`✅ Order saved: ${transactionId} | ${method} | $${total} | ${customerName || 'Guest'}`);
-
-        await sendOrderEmail(order);
+        console.log(`✅ Order saved: ${transactionId} | ${method} | $${total}`);
 
         // Payment URLs
         const paymentUrls = {
@@ -168,25 +157,36 @@ app.post('/api/initiate-payment', async (req, res) => {
         const apiKey = apiKeys[method];
 
         if (!baseUrl) {
-            return res.status(400).json({ success: false, error: 'Unsupported payment method' });
+            return res.status(400).json({ 
+                success: false, 
+                error: `Unsupported payment method: ${method}` 
+            });
         }
 
+        // Return success response
         res.json({
             success: true,
             transactionId: transactionId,
             paymentMethod: method,
             paymentUrl: `${baseUrl}/v1/payments?apiKey=${apiKey}&amount=${total}&currency=USD&orderId=${transactionId}`,
-            order: { total, items, customerName: customerName || 'Guest' }
+            order: { 
+                total, 
+                items, 
+                customerName: customerName || 'Guest' 
+            }
         });
 
     } catch (error) {
         console.error('❌ Payment error:', error);
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            error: error.message || 'Internal server error' 
+        });
     }
 });
 
 // ============================================================
-// 📊 GET ALL ORDERS (Admin)
+// 📊 ADMIN - GET ALL ORDERS
 // ============================================================
 app.get('/api/orders', (req, res) => {
     const password = req.query.password;
@@ -199,16 +199,13 @@ app.get('/api/orders', (req, res) => {
     const totalRevenue = orders.reduce((sum, o) => sum + (o.total || 0), 0);
     const methodCounts = {};
     orders.forEach(o => { methodCounts[o.method] = (methodCounts[o.method] || 0) + 1; });
-    const statusCounts = {};
-    orders.forEach(o => { statusCounts[o.status] = (statusCounts[o.status] || 0) + 1; });
 
     res.json({
         success: true,
         stats: {
             totalOrders: orders.length,
             totalRevenue,
-            methodCounts,
-            statusCounts
+            methodCounts
         },
         orders: orders.reverse()
     });
@@ -221,23 +218,6 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), (req, res) =
     try {
         const data = JSON.parse(req.body.toString());
         console.log('[Webhook] Received:', data);
-
-        const transactionId = data.transactionId || data.orderId || data.id || data.reference;
-        
-        if (transactionId) {
-            let orders = loadOrders();
-            const orderIndex = orders.findIndex(o => o.transactionId === transactionId);
-            
-            if (orderIndex !== -1) {
-                orders[orderIndex].status = 'completed';
-                orders[orderIndex].paymentDetails = data;
-                orders[orderIndex].completedAt = new Date().toISOString();
-                saveOrders(orders);
-                console.log(`✅ Order ${transactionId} marked as COMPLETED`);
-                sendOrderEmail({ ...orders[orderIndex], status: 'completed' });
-            }
-        }
-
         res.json({ success: true });
     } catch (error) {
         console.error('Webhook error:', error);
@@ -246,17 +226,18 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), (req, res) =
 });
 
 // ============================================================
-// 🚀 START
+// 🚀 START SERVER
 // ============================================================
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`
 ╔═══════════════════════════════════════════════╗
 ║   🚀 UT Halal Gyro Server Started!            ║
 ╠═══════════════════════════════════════════════╣
 ║   📡 Port: ${PORT}                                ║
-║   📧 Email: ${process.env.EMAIL_USER ? '✅ ENABLED' : '❌ DISABLED'}    ║
-║   📊 Orders: ${loadOrders().length} total           ║
-║   🔑 Admin: ?password=${process.env.ADMIN_PASSWORD || 'admin123'} ║
+║   🔗 URL: https://ut-halal-gyro.onrender.com   ║
+║   ❤️ Health: /api/health                       ║
+║   💳 Payment: /api/initiate-payment            ║
+║   📊 Admin: /api/orders?password=admin123     ║
 ╚═══════════════════════════════════════════════╝
     `);
 });
